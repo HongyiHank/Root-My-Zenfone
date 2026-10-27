@@ -1,0 +1,204 @@
+From: Root My Zenfone <noreply@example.invalid>
+Subject: [PATCH] msm-5.4: match the ZF8 device's struct module and build with GCC
+
+SPDX-License-Identifier: GPL-2.0-only
+
+These are the kernel-side changes the ZF8 module build needs. The device kernel
+is built with Clang and CONFIG_CFI_CLANG; the module is built with GCC, where
+that option is absent and the CFI fields disappear from struct module. Making
+them unconditional restores the device layout, and modpost has to emit
+.cfi_check for the field to point anywhere.
+
+The rest is what the vendor tree needs before GCC will compile it at all.
+
+Applies to the ASUS 33.0210.0210.296 source drop, kernel/msm-5.4. The SHA-256 of
+every pre-image is in 0003.files.sha256.
+---
+diff --git a/include/linux/module.h b/include/linux/module.h
+index 4f71785..1b09410 100755
+--- a/include/linux/module.h
++++ b/include/linux/module.h
+@@ -367,7 +367,8 @@
+ 	const s32 *crcs;
+ 	unsigned int num_syms;
+ 
+-#ifdef CONFIG_CFI_CLANG
++/* ZF8 device parity: 5.4.210-qgki has CFI_CLANG=y; modfinal sub-make cannot see ccflags */
++#if 1 /* was: #ifdef CONFIG_CFI_CLANG */
+ 	cfi_check_fn cfi_check;
+ #endif
+ 
+@@ -467,7 +468,7 @@
+ 	unsigned int num_bpf_raw_events;
+ 	struct bpf_raw_event_map *bpf_raw_events;
+ #endif
+-#ifdef CONFIG_JUMP_LABEL
++#if 1 /* was: #ifdef CONFIG_JUMP_LABEL (ZF8 device parity) */
+ 	struct jump_entry *jump_entries;
+ 	unsigned int num_jump_entries;
+ #endif
+@@ -497,9 +498,9 @@
+ #ifdef CONFIG_MODULE_UNLOAD
+ 	/* What modules depend on me? */
+ 	struct list_head source_list;
++
+ 	/* What modules do I depend on? */
+ 	struct list_head target_list;
+-
+ 	/* Destruction function. */
+ 	void (*exit)(void);
+ 
+diff --git a/include/linux/cfi.h b/include/linux/cfi.h
+index 6ef37b3..2b402c8 100755
+--- a/include/linux/cfi.h
++++ b/include/linux/cfi.h
+@@ -9,7 +9,7 @@
+ 
+ #include <linux/stringify.h>
+ 
+-#ifdef CONFIG_CFI_CLANG
++#if 1 /* ZF8 device parity (was #ifdef CONFIG_CFI_CLANG) */
+ #ifdef CONFIG_MODULES
+ 
+ typedef void (*cfi_check_fn)(uint64_t id, void *ptr, void *diag);
+diff --git a/scripts/mod/modpost.c b/scripts/mod/modpost.c
+index a2357c4..18557c6 100755
+--- a/scripts/mod/modpost.c
++++ b/scripts/mod/modpost.c
+@@ -2284,6 +2284,8 @@
+ 	buf_printf(b, "\t.name = KBUILD_MODNAME,\n");
+ 	if (mod->has_init)
+ 		buf_printf(b, "\t.init = init_module,\n");
++	/* ZF8 device parity: qgki CFI kernel requires mod->cfi_check for slowpath */
++	buf_printf(b, "\t.cfi_check = __cfi_check,\n");
+ 	if (mod->has_cleanup)
+ 		buf_printf(b, "#ifdef CONFIG_MODULE_UNLOAD\n"
+ 			      "\t.exit = cleanup_module,\n"
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index 3a4615f..75a7d3d 100755
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -1673,7 +1673,7 @@
+ 	def_bool $(cc-option,-mstack-protector-guard=sysreg -mstack-protector-guard-reg=sp_el0 -mstack-protector-guard-offset=0)
+ 
+ config STACKPROTECTOR_PER_TASK
+-	def_bool y
++	def_bool n
+ 	depends on STACKPROTECTOR && CC_HAVE_STACKPROTECTOR_SYSREG
+ 
+ endmenu
+diff --git a/arch/arm64/Makefile b/arch/arm64/Makefile
+index 7ee7ce7..401b6c0 100755
+--- a/arch/arm64/Makefile
++++ b/arch/arm64/Makefile
+@@ -68,15 +68,7 @@
+ KBUILD_CFLAGS	+= $(call cc-option,-mabi=lp64)
+ KBUILD_AFLAGS	+= $(call cc-option,-mabi=lp64)
+ 
+-ifeq ($(CONFIG_STACKPROTECTOR_PER_TASK),y)
+-prepare: stack_protector_prepare
+-stack_protector_prepare: prepare0
+-	$(eval KBUILD_CFLAGS += -mstack-protector-guard=sysreg		  \
+-				-mstack-protector-guard-reg=sp_el0	  \
+-				-mstack-protector-guard-offset=$(shell	  \
+-			awk '{if ($$2 == "TSK_STACK_CANARY") print $$3;}' \
+-					include/generated/asm-offsets.h))
+-endif
++# PATCHED: PER_TASK sysreg canary disabled (device config has no PER_TASK)
+ 
+ # Ensure that if the compiler supports branch protection we default it
+ # off.
+diff --git a/arch/arm64/include/asm/stack_pointer.h b/arch/arm64/include/asm/stack_pointer.h
+index 8e57c96..4a278ae 100755
+--- a/arch/arm64/include/asm/stack_pointer.h
++++ b/arch/arm64/include/asm/stack_pointer.h
+@@ -5,6 +5,12 @@
+ /*
+  * how to get the current stack pointer from C
+  */
+-register unsigned long current_stack_pointer asm ("sp");
++/* PATCHED: clang-17 (NDK) rejects asm("sp") global register var on aarch64.
++   Statement expression reads sp at use site — semantically equivalent. */
++#define current_stack_pointer ({ \
++    unsigned long _z8sp; \
++    __asm__ volatile("mov %0, sp" : "=r"(_z8sp)); \
++    _z8sp; \
++})
+ 
+ #endif /* __ASM_STACK_POINTER_H */
+diff --git a/kernel/asusdebug.c b/kernel/asusdebug.c
+index 38bdfc8..5b5028c 100755
+--- a/kernel/asusdebug.c
++++ b/kernel/asusdebug.c
+@@ -29,6 +29,13 @@
+ #include <soc/qcom/minidump.h>
+ #include <asm/syscall_wrapper.h>
+ 
++/* Vendor release script normally passes ASUS_BUILD_NUMBER_CHIPCODE via the
++ * top-level Makefile (-DASUS_SW_VER_CHIP=...); fall back to the plain build
++ * version so off-release builds compile. */
++#ifndef ASUS_SW_VER_CHIP
++# define ASUS_SW_VER_CHIP ASUS_SW_VER
++#endif
++
+ 
+ //extern int g_user_dbg_mode;
+ 
+diff --git a/drivers/soc/qcom/Makefile b/drivers/soc/qcom/Makefile
+index 6bd8d4a..0e96350 100755
+--- a/drivers/soc/qcom/Makefile
++++ b/drivers/soc/qcom/Makefile
+@@ -1,5 +1,7 @@
+ # SPDX-License-Identifier: GPL-2.0
+ CFLAGS_rpmh-rsc.o := -I$(src)
++# hyp_core_ctl_trace.h uses TRACE_INCLUDE_PATH . (works with clang's -I behaviour; GCC needs it explicit)
++CFLAGS_hyp_core_ctl.o := -I$(src)
+ obj-$(CONFIG_QCOM_AOSS_QMP) +=	qcom_aoss.o
+ obj-$(CONFIG_QCOM_GENI_SE) +=	qcom-geni-se.o
+ obj-$(CONFIG_QCOM_COMMAND_DB) += cmd-db.o
+diff --git a/drivers/hid/Makefile b/drivers/hid/Makefile
+index 9588045..b5eadfa 100755
+--- a/drivers/hid/Makefile
++++ b/drivers/hid/Makefile
+@@ -143,3 +143,5 @@
+ obj-$(INTEL_ISH_FIRMWARE_DOWNLOADER)	+= intel-ish-hid/
+ 
+ obj-$(CONFIG_HID_QVR)		+= hid-qvr.o hid-trace.o
++# hid-trace.h uses TRACE_INCLUDE_PATH .; needs explicit -I$(src)
++CFLAGS_hid-trace.o += -I$(src)
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index 038d015..1aa5155 100755
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -1,5 +1,8 @@
+ # SPDX-License-Identifier: GPL-2.0
+ subdir-ccflags-$(CONFIG_POWER_SUPPLY_DEBUG) := -DDEBUG
++# ASUS fg-core.h uses angle include with relative path (../../extcon/extcon.h);
++# GCC resolves <> only against -I dirs, so give it this subdir as a base.
++ccflags-y += -I$(src)
+ 
+ power_supply-y				:= power_supply_core.o
+ power_supply-$(CONFIG_SYSFS)		+= power_supply_sysfs.o
+diff --git a/drivers/net/wireless/cnss2/Makefile b/drivers/net/wireless/cnss2/Makefile
+index c031c5c..5ba9682 100755
+--- a/drivers/net/wireless/cnss2/Makefile
++++ b/drivers/net/wireless/cnss2/Makefile
+@@ -3,6 +3,8 @@
+ obj-$(CONFIG_CNSS2) += cnss2.o
+ 
+ ccflags-y += -I$(srctree)/drivers/net/wireless/cnss_utils/
++# GCC (unlike vendor clang) errors on &enum passed as u32* in bus.c
++CFLAGS_bus.o += -Wno-error=incompatible-pointer-types
+ cnss2-y := main.o
+ cnss2-y += bus.o
+ cnss2-y += debug.o
+diff --git a/kernel/sched/walt/Makefile b/kernel/sched/walt/Makefile
+index 8bf42cb..d961e19 100755
+--- a/kernel/sched/walt/Makefile
++++ b/kernel/sched/walt/Makefile
+@@ -1,3 +1,5 @@
+ # SPDX-License-Identifier: GPL-2.0
+ obj-$(CONFIG_SCHED_WALT) += walt.o boost.o sched_avg.o qc_vas.o core_ctl.o trace.o
++# Vendor trace.h uses TRACE_INCLUDE_PATH .; GCC only resolves that with an explicit -I$(src)
++ccflags-y += -I$(src)
+ obj-$(CONFIG_CPU_FREQ) += cpu-boost.o

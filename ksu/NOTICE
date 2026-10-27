@@ -1,0 +1,56 @@
+# 授權與來源說明
+
+這個目錄不是單一授權。依路徑分列，全文見 [`LICENSE`](LICENSE)。
+
+| 路徑 | 授權 | 說明 |
+|---|---|---|
+| `patch/0002-zf8-tag-build.patch`、`patch/0003-zf8-kernel-side.patch` | GPL-2.0-only | 只動 `kernel/` 與 kernel 樹的檔案 |
+| `patch/0001-zf8-device.patch` | 混合 | kernel 的 hunk 是 GPL-2.0-only；`KernelRepository.kt` 的 hunk 是 GPL-3.0 |
+| `artifacts/kernelsu-zf8-rc3-officialkey.ko` | **GPL-2.0-only** | 只從 `kernel/` 編出，對的是 GPL-2.0-only 的 header |
+| `tools/`、`config/`、`build.sh`、`README.md`、`NOTICE` | GPL-2.0-only | 為本專案所寫 |
+
+## 兩份授權的分界
+
+ReSukiSU 的 repo 根 `LICENSE` 是 GPL-3.0，但 `kernel/LICENSE` 是 GPL-2.0 全文，涵蓋
+`kernel/` 底下的所有檔案。`kernel/` 的 89 個 `.c／.h` 裡只有 5 個帶自己的 SPDX
+（`GPL-2.0-only`），其餘照 `kernel/LICENSE`。
+
+模組只從 `kernel/` 編譯（`M=<tree>/kernel`），用的是 ASUS source drop 的 header，而那些
+是 `GPL-2.0-only` 加 Linux syscall note（樹根 `COPYING`：「version 2 only」）。兩邊都是
+GPL-2.0，沒有任何 GPL-3.0 的程式碼進到 `.ko`，所以 `.ko` 是 GPL-2.0-only。
+
+`0001` 是唯一跨界的：它有一個 hunk 動 `manager/app/.../KernelRepository.kt`，那個目錄在
+repo 根之下，屬 GPL-3.0。其餘 hunk 都在 `kernel/`。整份檔案照原樣提供，兩半可以各依自己
+的條款取用。
+
+## 對應源碼
+
+重建需要四項輸入。
+
+**一、上游 ReSukiSU。** BakaSU（原 ReSukiSU），<https://github.com/Baka-SU/BakaSU>，
+tag `v4.2.0-rc3`，commit `239e1e8871b8fcd51a6e5b3002e0ba522fdd99fb`。checkout 後依序套
+`patch/0001-zf8-device.patch`、`patch/0002-zf8-tag-build.patch`，兩份都乾淨套用，沒有
+reject。
+
+模組只取這棵樹的 `kernel/`；`manager/`、`userspace/` 不進 `.ko`，它們只影響 APK。
+
+**二、管理器 APK。** 取自 <https://github.com/Baka-SU/BakaSU/releases/tag/v4.2.0-rc3>
+的 arm64 asset，未改動。
+
+**三、kernel 來源樹。** ASUS Zenfone 8 Flip（ZS672KS／ASUS_I004D）的 source drop，版本
+`33.0210.0210.296`，目錄名 `zenfone8_zs672ks.mp-33.0210.0210.296`，內層
+`UL-ASUS_I004D-ASUS-33.0210.0210.296-1.1.10-2305-user`。由 ASUS 的支援頁面依機型下載。
+
+這棵樹的 `Makefile` 是 `5.4.147`，**不是**裝置正在跑的 `5.4.210-qgki-perf-g6e91db764350`
+（`.337` build）。ASUS 沒有為 `.337` 公布對應的 source drop，所以模組是對 `.296` 的
+header 編的。四項 ABI 條件（`struct module` 960 bytes、`__versions` 0 entries、vermagic、
+`__cfi_check` 的位置）都與裝置相符，但原始碼層級不是同一份。
+
+**四、kernel 側的修改。** `patch/0003-zf8-kernel-side.patch`，12 個檔。檔頭的 `diff --git`
+與 `index` 行標出 pre-image 的 blob hash，但那只是標記——`git apply` 不驗它。真正擋住
+「套到錯的樹」的是 `patch/0003.files.sha256`：12 個檔在套用前的 SHA-256，`build.sh` 兩條
+路徑都先跑 `sha256sum -c`，不符就中止。
+
+## 重建
+
+[`build.sh`](build.sh) 把上面四項接起來，含 `config/zf8-module.config`，約 15 分鐘、5 GB。

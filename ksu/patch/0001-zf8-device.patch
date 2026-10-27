@@ -1,0 +1,411 @@
+diff --git a/kernel/Kbuild b/kernel/Kbuild
+index ae6703f..860fe40 100644
+--- a/kernel/Kbuild
++++ b/kernel/Kbuild
+@@ -40,6 +40,8 @@ ifdef CONFIG_ARM64
+ kernelsu-objs += compat/apatch_conflict.o
+ endif
+ 
++ccflags-y += -Wno-error=return-type
++ccflags-y += -DCONFIG_KSU_ZF8_LATE_LOAD=1 -DCONFIG_KSU_NO_OBSERVER=1 -DCONFIG_KSU_NO_SELINUX_HIDE=1 -DCONFIG_KSU_NO_TABLE_PATCH=1
+ ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-missing-prototypes
+ ccflags-y += $(call cc-disable-warning, int-conversion)
+ ccflags-y += -Wno-declaration-after-statement -Wno-unused-function -Wno-unused-variable -Wno-missing-braces
+@@ -50,6 +52,8 @@ ccflags-y += -I$(srctree)/$(src) -I$(srctree)/$(src)/include
+ ccflags-y += -I$(src) -I$(src)/include
+ 
+ obj-$(CONFIG_KSU) += kernelsu.o
++# ZF8: CFI stub linked LAST so __cfi_check lands mid-page (non-page-aligned)
++kernelsu-objs += cfi_stub.o
+ 
+ REPO_NAME := ReSukiSU
+ 
+@@ -242,3 +246,4 @@ $(info -- KernelSU Manager package name: $(KSU_MANAGER_PACKAGE))
+ endif
+ 
+ # Keep a new line here!! Because someone may append config
++# (obj-m += kernelsu.o removed: duplicate of obj-$(CONFIG_KSU) above)
+diff --git a/kernel/core/init.c b/kernel/core/init.c
+index 15e3410..78037ae 100644
+--- a/kernel/core/init.c
++++ b/kernel/core/init.c
+@@ -233,11 +233,16 @@ int __init kernelsu_init(void)
+     }
+ 
+     ksu_init_symbol_resolver();
++
+     ksu_selinux_init();
+     ksu_feature_init();
+     ksu_sulog_init();
+     ksu_adb_root_init();
++#if defined(CONFIG_KSU_NO_SELINUX_HIDE)
++    pr_info("ZF8: selinux_hide init skipped (5.4 policydb ABI)\n");
++#else
+     ksu_selinux_hide_init();
++#endif
+ 
+     ksu_supercalls_init();
+     ksu_app_profile_init();
+diff --git a/kernel/feature/sucompat.c b/kernel/feature/sucompat.c
+index aa4a13e..4f004a8 100644
+--- a/kernel/feature/sucompat.c
++++ b/kernel/feature/sucompat.c
+@@ -170,7 +170,7 @@ long ksu_handle_faccessat_sucompat_internal(int orig_nr, struct pt_regs *regs)
+ 
+     char path[sizeof(su_path) + 1];
+     memset(path, 0, sizeof(path));
+-    strncpy_from_user_nofault(path, *filename_user, sizeof(path));
++    ksu_strncpy_from_user_nofault(path, *filename_user, sizeof(path));
+ 
+     if (unlikely(!memcmp(path, su_path, sizeof(su_path)))) {
+         old_cred = override_creds(ksu_cred);
+@@ -205,7 +205,7 @@ long ksu_handle_stat_sucompat_internal(int orig_nr, struct pt_regs *regs)
+ 
+     char path[sizeof(su_path) + 1];
+     memset(path, 0, sizeof(path));
+-    strncpy_from_user_nofault(path, *filename_user, sizeof(path));
++    ksu_strncpy_from_user_nofault(path, *filename_user, sizeof(path));
+ 
+     if (unlikely(!memcmp(path, su_path, sizeof(su_path)))) {
+         old_cred = override_creds(ksu_cred);
+diff --git a/kernel/hook/arm64/syscall_hook.c b/kernel/hook/arm64/syscall_hook.c
+index 5f5b32c..3a9cff9 100644
+--- a/kernel/hook/arm64/syscall_hook.c
++++ b/kernel/hook/arm64/syscall_hook.c
+@@ -200,6 +200,10 @@ bool ksu_has_syscall_hook(int nr)
+ void __init ksu_syscall_hook_init(void)
+ {
+     int ni_slot;
++#if defined(CONFIG_KSU_NO_TABLE_PATCH)
++    pr_info("ZF8: syscall table patching disabled\n");
++    return;
++#endif
+ 
+     memset(syscall_hooks, 0, sizeof(syscall_hooks));
+ 
+diff --git a/kernel/hook/syscall_hook_manager.c b/kernel/hook/syscall_hook_manager.c
+index ee34f98..eb20667 100644
+--- a/kernel/hook/syscall_hook_manager.c
++++ b/kernel/hook/syscall_hook_manager.c
+@@ -17,11 +17,18 @@
+ 
+ #include "arch.h"
+ #include "klog.h" // IWYU pragma: keep
++#include "uapi/supercall.h"   // ZF8: KSU_INSTALL_MAGIC1 for the reboot supercall
++#include "supercall/supercall.h"
++#include "policy/app_profile.h"   // ZF8: disable_seccomp()
+ #include "hook/syscall_hook_manager.h"
+ #include "hook/tp_marker.h"
+ #include "feature/sucompat.h"
+ #include "hook/setuid_hook.h"
+ #include "hook/syscall_hook.h"
++#include "compat/kernel_compat.h"   // ZF8: ksu_get_uid_t
++#include "manager/manager_identity.h"   // ZF8: ksu_is_manager_uid
++#include "selinux/selinux.h"           // ZF8: is_zygote
++#include <linux/cred.h>                // ZF8: current_cred
+ #include "hook/syscall_event_bridge.h"
+ 
+ #ifdef CONFIG_KRETPROBES
+@@ -97,6 +104,80 @@ static struct kretprobe *syscall_unregfunc_rp = NULL;
+ // sys_enter handler: redirect hooked syscalls to the dispatcher
+ static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
+ {
++#if defined(__aarch64__) && defined(CONFIG_KSU_ZF8_LATE_LOAD)
++    /* ZF8: the reboot supercall is handled entirely inside the tracepoint.
++       sys_call_table is never touched: its physical page is aliased a second
++       time through the chain's 3 GB device window, so writing it faults.
++       Only the on-stack regs are written (RW) and the handler is called
++       directly. magic1 == KSU_INSTALL_MAGIC1 installs the fd, sets
++       syscallno = NO_SYSCALL to suppress the real reboot and returns 0.
++       A reboot without the KSU magic is passed through unchanged. */
++    if (id == __NR_reboot) {
++        int magic1 = (int)regs->regs[0];
++        if (magic1 == KSU_INSTALL_MAGIC1) {
++            int magic2 = (int)regs->regs[1];
++            unsigned int cmd = (unsigned int)regs->regs[2];
++            void __user **arg = (void __user **)&regs->regs[3];
++            long r = ksu_handle_sys_reboot(magic1, magic2, cmd, arg);
++            regs->syscallno = -1;   /* NO_SYSCALL: skip invoke_syscall */
++            regs->regs[0] = (u64)r; /* syscall return value */
++            return;
++        }
++    }
++    /* ZF8: setresuid to the manager uid installs the fd. Running the full
++       ksu_handle_setuid here panics as soon as the app starts: in sys_enter
++       it reaches ksu_set_ksud_status, which takes kern_path() and
++       inode_lock(), i.e. sleeping locks. This path only checks three
++       conditions and calls ksu_install_fd():
++       (a) id == 147, setresuid (arm64 native; zygote calls it per child);
++       (b) is_zygote(current_cred()), so it only fires on the zygote->app
++           uid transition (tp_marker.c:92 already calls it under a spinlock,
++           which proves it is atomic-safe);
++       (c) the new uid is the manager uid: ksu_is_manager_uid(regs[0]).
++       ksu_install_fd is already proven safe in sys_enter by the reboot
++       interception path. Seccomp surgery, ksud immutable and umount are
++       skipped: the app only needs the fd and the ioctls. */
++    if (id == 147 && ksu_is_manager_uid((u32)regs->regs[0]) &&
++        is_zygote(current_cred())) {
++        pr_info("ZF8: zygote->manager uid=%d pid=%d, install fd\n",
++                (u32)regs->regs[0], current->pid);
++        ksu_install_fd_nocloexec();
++        /* Clear the zygote-wide seccomp policy now (it was inherited at
++           fork time). Upstream setuid_hook.c:123 does the same in its
++           allow-uid branch for kernels < 5.10: disable_seccomp() calls
++           put_seccomp_filter() under a spinlock and is atomic-safe (the
++           panic came from ksu_set_ksud_status and its inode_lock, not
++           from here). Together with the seccomp(2)/prctl suppression
++           below, the manager process carries no filter and its libksud
++           children can reach the reboot interception. */
++        disable_seccomp();
++    }
++    /* ZF8: suppress seccomp(2) installation for the manager process.
++       forkAndSpecialize order: fork -> setresuid(10249) (the point above,
++       filter not installed yet) -> setupSeccomp(), which installs AppPolicy
++       through seccomp(2) = 277. Every descendant of that process (the
++       libksud debug su forked and exec'd by libsu) then carries AppPolicy.
++       secure_computing runs before trace_sys_enter (ptrace.c:1847 < 1855),
++       so the reboot magic returns ERRNO before reaching the interception
++       above. Observed: the app's own fd 3 survived (the non-CLOEXEC
++       install worked) but the libksud child showed no ioctl at all, because
++       libcore's forkAndExec clears non-standard fds and the magic was
++       blocked as well. This suppression mirrors the syscallno = -1,
++       return 0 mechanism above; it matches only the manager uid, so
++       webview/renderer uids are unaffected. With no seccomp in the app,
++       the child's magic reaches the interception, the fd is installed,
++       GRANT_ROOT is issued ('allow root for: 10249') and the escape
++       completes. */
++    if ((id == 277 /* __NR_seccomp */ ||
++         (id == 167 /* __NR_prctl */ && (int)regs->regs[0] == 22 /* PR_SET_SECCOMP */)) &&
++        ksu_is_manager_uid(ksu_get_uid_t(current_uid()))) {
++        pr_info("ZF8: suppress seccomp for manager uid=%d pid=%d\n",
++                ksu_get_uid_t(current_uid()), current->pid);
++        regs->syscallno = -1;   /* NO_SYSCALL */
++        regs->regs[0] = 0;      /* seccomp(2) returns 0 = success */
++        return;
++    }
++#endif
+ #if defined(__x86_64__)
+     if (unlikely(in_compat_syscall()))
+ #elif defined(__aarch64__)
+@@ -123,6 +204,11 @@ static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
+ }
+ #endif
+ 
++/* The old ksu_hook_reboot()/ksu_z8_reboot_direct() helpers were removed:
++   the inline reboot handling in ksu_sys_enter_handler() covers the whole
++   supercall, and the dispatcher path is unreachable under
++   CONFIG_KSU_NO_TABLE_PATCH (ksu_dispatcher_nr is always -1). */
++
+ void __init ksu_syscall_hook_manager_init(void)
+ {
+     int ret;
+@@ -133,7 +219,6 @@ void __init ksu_syscall_hook_manager_init(void)
+     syscall_unregfunc_rp = init_kretprobe("syscall_unregfunc", syscall_unregfunc_handler);
+ #endif
+ 
+-    // Register syscall hooks via dispatcher
+     ksu_register_syscall_hook(__NR_setresuid, ksu_hook_setresuid);
+     ksu_register_syscall_hook(__NR_execve, ksu_hook_execve);
+     ksu_register_syscall_hook(__NR_execveat, ksu_hook_execveat);
+diff --git a/kernel/manager/pkg_observer.c b/kernel/manager/pkg_observer.c
+index 01206f1..588e2ce 100644
+--- a/kernel/manager/pkg_observer.c
++++ b/kernel/manager/pkg_observer.c
+@@ -21,8 +21,14 @@ struct watch_dir {
+ 
+ static struct fsnotify_group *g;
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+ static int ksu_handle_inode_event(struct fsnotify_mark *mark, u32 mask, struct inode *inode, struct inode *dir,
+                                   const struct qstr *file_name, u32 cookie)
++#else
++static int ksu_handle_event(struct fsnotify_group *group, struct inode *inode, u32 mask, const void *data,
++                            int data_type, const struct qstr *file_name, u32 cookie,
++                            struct fsnotify_iter_info *iter_info)
++#endif
+ {
+     if (!file_name)
+         return 0;
+@@ -36,7 +42,11 @@ static int ksu_handle_inode_event(struct fsnotify_mark *mark, u32 mask, struct i
+ }
+ 
+ static const struct fsnotify_ops ksu_ops = {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+     .handle_inode_event = ksu_handle_inode_event,
++#else
++    .handle_event = ksu_handle_event,
++#endif
+ };
+ 
+ static int add_mark_on_inode(struct inode *inode, u32 mask, struct fsnotify_mark **out)
+@@ -101,6 +111,10 @@ static struct watch_dir g_watch = { .path = "/data/system", .mask = MASK_SYSTEM
+ 
+ int ksu_observer_init(void)
+ {
++#if defined(CONFIG_KSU_NO_OBSERVER)
++    pr_info("ZF8: package observer disabled\n");
++    return 0;
++#endif
+     int ret = 0;
+ 
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+@@ -118,6 +132,9 @@ int ksu_observer_init(void)
+ 
+ void __exit ksu_observer_exit(void)
+ {
++#if defined(CONFIG_KSU_NO_OBSERVER)
++    return;
++#endif
+     unwatch_one_dir(&g_watch);
+     fsnotify_put_group(g);
+     pr_info("%s: done.\n", __func__);
+diff --git a/kernel/runtime/ksud_integration.c b/kernel/runtime/ksud_integration.c
+index 2ddcf31..b42a8a1 100644
+--- a/kernel/runtime/ksud_integration.c
++++ b/kernel/runtime/ksud_integration.c
+@@ -42,7 +42,7 @@
+ #include "compat/kernel_compat.h"
+ #include "selinux/selinux.h"
+ #include "manager/throne_tracker.h"
+-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
++#if defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(CONFIG_KPROBES)
+ #include "hook/syscall_hook.h"
+ #endif
+ 
+@@ -75,7 +75,7 @@ static void stop_init_rc_hook(void);
+ static void stop_execve_hook(void);
+ 
+ // clang-format off
+-#if defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#if defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(CONFIG_KPROBES)
+     static struct work_struct stop_input_hook_work;
+ 
+     // tp hook will ask kernel unregister hook when we no need
+@@ -95,6 +95,10 @@ static void stop_execve_hook(void);
+         bool ret = schedule_work(&stop_input_hook_work);
+         pr_info("unregister input kprobe: %d!\n", ret);
+     }
++#elif defined(CONFIG_KSU_TRACEPOINT_HOOK) /* no KPROBES: input/init_rc hooks unavailable */
++    #define ksu_init_rc_hook_inactive() true
++    #define ksu_input_hook_inactive() true
++    static inline void stop_input_hook(void) { }
+ #elif defined(CONFIG_KSU_SUSFS)
+     DEFINE_STATIC_KEY_TRUE(ksu_is_init_rc_hook_enabled);
+     DEFINE_STATIC_KEY_TRUE(ksu_is_input_hook_enabled);
+@@ -974,6 +978,8 @@ static void ksu_execve_hook_ksud_common(const char __user *filename_user, const
+ 
+     ksu_handle_execveat_ksud(path, &argv, NULL, NULL);
+ }
++#if defined(CONFIG_KPROBES) || defined(CONFIG_KSU_TRACEPOINT_HOOK)
++
+ 
+ void ksu_execve_hook_ksud(const struct pt_regs *regs)
+ {
+@@ -1059,6 +1065,7 @@ static void do_stop_input_hook(struct work_struct *work)
+ {
+     unregister_kprobe(&input_event_kp);
+ }
++#endif /* KPROBES */
+ #endif
+ 
+ void ksu_stop_input_hook_runtime(void)
+@@ -1074,7 +1081,7 @@ void ksu_stop_input_hook_runtime(void)
+ // ksud: module support
+ void __init ksu_ksud_init(void)
+ {
+-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
++#if defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(CONFIG_KPROBES)
+     int ret;
+ 
+     ksu_syscall_table_hook(__NR_read, ksu_sys_read, &orig_sys_read);
+@@ -1092,7 +1099,7 @@ void __init ksu_ksud_init(void)
+ 
+ void __exit ksu_ksud_exit(void)
+ {
+-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
++#if defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(CONFIG_KPROBES)
+     // TODO:
+     // this should be done before unregister vfs_read_kp
+     // stop_init_rc_hook();
+diff --git a/kernel/supercall/supercall.c b/kernel/supercall/supercall.c
+index 7fde216..08ab97e 100644
+--- a/kernel/supercall/supercall.c
++++ b/kernel/supercall/supercall.c
+@@ -91,6 +91,17 @@ int ksu_install_fd(void)
+     return ksu_install_fd_with_permissions(O_CLOEXEC, 0);
+ }
+ 
++/* ZF8: non-CLOEXEC variant. When the app (a zygote child) execs the
++   libksud child, the fd survives, so scan_driver_fd finds it directly and
++   the reboot-magic fallback is no longer needed (5.4 has no seccomp
++   action_cache, and the magic is blocked by the zygote seccomp filter
++   because secure_computing runs before trace_sys_enter). Built on the
++   upstream permissions parameter, only fd_flags = 0. */
++int ksu_install_fd_nocloexec(void)
++{
++    return ksu_install_fd_with_permissions(0, 0);
++}
++
+ int ksu_install_su_fd(void)
+ {
+     // This descriptor must be installed after the exec into ksud.
+@@ -159,7 +170,7 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user
+     return 0;
+ }
+ 
+-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
++#if defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(CONFIG_KPROBES)
+ // Reboot hook for installing fd
+ static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
+ {
+@@ -185,7 +196,7 @@ void __init ksu_supercalls_init(void)
+ 
+     ksu_supercall_dump_commands();
+ 
+-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
++#if defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(CONFIG_KPROBES)
+     rc = register_kprobe(&reboot_kp);
+     if (rc) {
+         pr_err("reboot kprobe failed: %d\n", rc);
+@@ -197,7 +208,7 @@ void __init ksu_supercalls_init(void)
+ 
+ void __exit ksu_supercalls_exit(void)
+ {
+-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
++#if defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(CONFIG_KPROBES)
+     unregister_kprobe(&reboot_kp);
+ #endif
+     ksu_supercall_cleanup_state();
+diff --git a/kernel/supercall/supercall.h b/kernel/supercall/supercall.h
+index 4728b17..d0439e6 100644
+--- a/kernel/supercall/supercall.h
++++ b/kernel/supercall/supercall.h
+@@ -17,12 +17,14 @@ struct ksu_ioctl_cmd_map {
+     ksu_perm_check_t perm_check; // Permission check function
+     bool allow_su_session;
+ };
+-
++// ZF8: reboot supercall entry (KPROBES=n devices route via the dispatcher)
++int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
+ // Install KSU fd to current process
+ int ksu_install_fd(void);
+ // Install a KSU fd that authorizes operations required while starting su.
+ int ksu_install_su_fd(void);
+ bool ksu_is_su_session_fd(const struct file *filp);
++int ksu_install_fd_nocloexec(void);   // ZF8: survives exec
+ 
+ void ksu_supercalls_init(void);
+ void ksu_supercalls_exit(void);
+diff --git a/manager/app/src/main/java/com/resukisu/resukisu/data/kernel/KernelRepository.kt b/manager/app/src/main/java/com/resukisu/resukisu/data/kernel/KernelRepository.kt
+index 9513708..f5797bf 100644
+--- a/manager/app/src/main/java/com/resukisu/resukisu/data/kernel/KernelRepository.kt
++++ b/manager/app/src/main/java/com/resukisu/resukisu/data/kernel/KernelRepository.kt
+@@ -31,7 +31,7 @@ class KernelRepository(
+             managerUAPIVersion = managerUapi,
+             kernelUAPIVersion = kernelUapi,
+             ksuFullVersion = "$fullVersion (${Natives.version}/$kernelUapi)",
+-            lkmMode = ksuVersion?.let { if (kernelVersion.isGKI()) Natives.isLkmMode else null },
++            lkmMode = ksuVersion?.let { runCatching { Natives.isLkmMode }.getOrDefault(false) },
+             kernelVersion = kernelVersion,
+             isRootAvailable = isRootAvailable,
+             isFullFeatured = isRootAvailable && runCatching { Natives.isFullFeatured() }

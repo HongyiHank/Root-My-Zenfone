@@ -1,0 +1,35 @@
+diff --git a/kernel/cfi_stub.c b/kernel/cfi_stub.c
+new file mode 100644
+index 0000000..8bc5a38
+--- /dev/null
++++ b/kernel/cfi_stub.c
+@@ -0,0 +1,12 @@
++// Module-side CFI landing pad. Indirect calls whose target resolves into this
++// module are routed through mod->cfi_check; the stub accepts every target.
++// The pad keeps __cfi_check off a page boundary.
++#include <linux/types.h>
++
++static void __cfi_pad(void)
++{
++}
++
++void __cfi_check(uint64_t id, void *ptr, void *diag)
++{
++}
+diff --git a/kernel/core/init.c b/kernel/core/init.c
+index 78037ae..b95a3f9 100644
+--- a/kernel/core/init.c
++++ b/kernel/core/init.c
+@@ -277,8 +277,12 @@ int __init kernelsu_init(void)
+         track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS);
+ 
+         if (!getenforce()) {
++#if defined(CONFIG_KSU_ZF8_LATE_LOAD)
++            pr_info("ZF8 late-load: keep SELinux permissive\n");
++#else
+             pr_info("Permissive SELinux, enforcing\n");
+             setenforce(true);
++#endif
+         }
+ #endif
+     } else {

@@ -1,0 +1,35 @@
+# Licence
+
+This directory is not under a single licence. Which licence applies depends on the
+path:
+
+| Path | Licence | Copyright |
+|---|---|---|
+| `patch/0002-zf8-tag-build.patch`, `patch/0003-zf8-kernel-side.patch` | GPL-2.0-only | upstream kernel-side contributors, plus the changes in those patches |
+| `patch/0001-zf8-device.patch` | mixed, see below | |
+| `artifacts/kernelsu-zf8-rc3-officialkey.ko` | GPL-2.0-only | built only from `kernel/` sources and kernel headers |
+| `tools/`, `config/`, `build.sh`, `README.md`, `NOTICE` | GPL-2.0-only | written for this project, to match the module they serve |
+
+Texts: [`LICENSE.GPL-2.0`](LICENSE.GPL-2.0), [`LICENSE.GPL-3.0`](LICENSE.GPL-3.0),
+[`LICENSE.Linux-syscall-note`](LICENSE.Linux-syscall-note).
+
+## Why the split
+
+ReSukiSU is published under two licences at once. The repository root `LICENSE` is
+GPL-3.0; `kernel/LICENSE` is GPL-2.0 and covers everything under `kernel/`. The
+module is compiled from `kernel/` only, against kernel headers that are
+GPL-2.0-only under the Linux syscall note. Nothing GPL-3.0 goes into it, so it is
+GPL-2.0-only.
+
+`0002` and `0003` touch only `kernel/` and kernel files, so they are GPL-2.0-only
+and carry `SPDX-License-Identifier: GPL-2.0-only`.
+
+`0001` is the exception: its hunks are mostly against `kernel/`, but one is against
+`manager/app/src/main/java/com/resukisu/resukisu/data/kernel/KernelRepository.kt`,
+which is under the repository root and therefore GPL-3.0. The kernel hunks are
+GPL-2.0-only and the Kotlin hunk is GPL-3.0; the file is offered as-is for
+convenience, and either half can be taken under its own terms.
+
+The manager APK is not distributed here. It is built from `userspace/` and
+`manager/`, both under the ReSukiSU repository root, and remains GPL-3.0 under
+that project's terms; take it from their release page.

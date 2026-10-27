@@ -1,0 +1,11 @@
+binary     = kgsl_23373_poc_main
+host_md5   = 216fdf917ea3243b6048c9635f29ce21
+device_md5 = 216fdf917ea3243b6048c9635f29ce21
+source_md5 = ba6ff0d5930c1348888f8fd99b0fa89f
+src_lines  = 8515
+argv       = 256 192 20000 root
+env        = PKEY_HIJACK_ONLY=1 LEGACY_BLIND_WRITE=0
+gcc        = aarch64-linux-gnu-gcc-12 (Debian 12.4.0-5) 12.4.0
+judge      = rootout 出現 uid=0(root)，用主機寫 rootcmd、讀 rootout 的往返判斷；log 行會被 f2fs writeback 丟掉，不能當判據
+probe      = 量測後用一個靜態程式從 adb shell 呼叫 syscall(289)：getuid() 不是 0；同時 rootcmd 仍回 uid=0
+attempts   = 3 輪，3 次嘗試，無重試
